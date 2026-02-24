@@ -1,4 +1,7 @@
-"""Configuration: env loading, LangSmith tracing."""
+"""Shared config: load .env and configure LangSmith tracing.
+
+No API keys or secrets are hardcoded. All values come from the environment.
+"""
 
 import os
 from pathlib import Path
@@ -9,23 +12,20 @@ from dotenv import load_dotenv
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_ENV_PATH)
 
+# LangSmith project name (used when tracing is enabled)
+LANGSMITH_PROJECT = "automaton-auditor"
 
-def ensure_config() -> None:
-    """Load env and enable LangSmith tracing if configured."""
+
+def configure_tracing() -> None:
+    """Enable LangSmith tracing from environment.
+
+    Reads .env and sets:
+    - LANGCHAIN_TRACING_V2=true when user has enabled tracing
+    - LANGCHAIN_PROJECT to the configured project name
+
+    Does not set LANGCHAIN_API_KEY; that must be set in .env if using LangSmith.
+    """
     load_dotenv(_ENV_PATH)
     if os.getenv("LANGCHAIN_TRACING_V2", "").lower() in ("true", "1", "yes"):
         os.environ["LANGCHAIN_TRACING_V2"] = "true"
-
-
-def get_openai_api_key() -> str | None:
-    """Get OpenAI API key from environment."""
-    return os.getenv("OPENAI_API_KEY")
-
-
-def get_langsmith_project() -> str:
-    """Get LangSmith project name."""
-    return os.getenv("LANGCHAIN_PROJECT", "digital-courtroom")
-
-
-# Called on import to set up tracing
-ensure_config()
+        os.environ.setdefault("LANGCHAIN_PROJECT", LANGSMITH_PROJECT)

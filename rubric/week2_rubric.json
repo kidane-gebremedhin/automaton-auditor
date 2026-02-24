@@ -1,18 +1,53 @@
 {
   "$schema": "week2-constitution",
   "version": "0.1.0",
-  "description": "Machine-readable constitution for Digital Courtroom audit",
+  "description": "Machine-readable constitution for Automaton Auditor",
   "criteria": [
     {
-      "id": "criterion_1",
-      "name": "Placeholder Criterion",
-      "description": "TODO: Add actual rubric criteria from week2 requirements",
+      "id": "graph_orchestration",
+      "name": "Graph Orchestration Architecture",
+      "description": "StateGraph with parallel fan-out/fan-in for Detectives and Judges",
+      "weight": 1.0
+    },
+    {
+      "id": "state_management",
+      "name": "State Management Rigor",
+      "description": "Typed state, reducers, no overwrites in parallel",
+      "weight": 1.0
+    },
+    {
+      "id": "git_forensic",
+      "name": "Git Forensic Analysis",
+      "description": "Sandboxed clone, git history, structured results",
+      "weight": 1.0
+    },
+    {
+      "id": "report_accuracy",
+      "name": "Report Accuracy",
+      "description": "Theoretical depth, path verification, no hallucination",
+      "weight": 1.0
+    },
+    {
+      "id": "safe_tools",
+      "name": "Safe Tool Engineering",
+      "description": "No os.system, subprocess with capture, structured errors",
       "weight": 1.0
     }
   ],
-  "verdicts": ["PASS", "FAIL", "PARTIAL"],
+  "forensic_instruction": "Detectives must collect evidence for: (1) Graph orchestration: StateGraph, add_edge, fan-out, EvidenceAggregator, parallel Judges. (2) State: TypedDict, Evidence, JudicialOpinion, reducers. (3) Git: clone in temp dir, git log --oneline --reverse, structured commits. (4) Report: theoretical terms (Dialectical Synthesis, Fan-In/Fan-Out, Metacognition, State Synchronization), file path extraction and verification. (5) Safety: no raw os.system, subprocess only. Use Targeting Protocol: github_repo→RepoInvestigator, pdf_report→DocAnalyst, pdf_images→VisionInspector.",
+  "judicial_logic": "Judges evaluate evidence against rubric criteria. Output JudicialOpinion per criterion: score 0-10, argument, cited_evidence. Enforce Hallucination Liability (cite only provided evidence) and Orchestration Fraud (claim parallel/fan-out only if evidenced). Prosecutor: strict. Defense: charitable. TechLead: technical rigor.",
   "synthesis_rules": {
-    "default": "majority",
-    "tie_breaker": "TechLead"
+    "security_override": true,
+    "fact_supremacy": true,
+    "functionality_weight": { "TechLead": 1.5, "Prosecutor": 1.2, "Defense": 0.9 },
+    "dissent_requirement": { "variance_threshold": 3 },
+    "variance_re_evaluation": true,
+    "score_threshold_pass": 7,
+    "score_threshold_partial": 4
+  },
+  "targeting": {
+    "github_repo": "RepoInvestigator",
+    "pdf_report": "DocAnalyst",
+    "pdf_images": "VisionInspector"
   }
 }

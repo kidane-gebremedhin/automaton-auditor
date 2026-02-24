@@ -1,1 +1,1 @@
-"""Tools for detectives: RepoInvestigator, DocAnalyst, VisionInspector."""
+# Agent tools

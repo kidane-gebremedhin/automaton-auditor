@@ -1,10 +1,11 @@
-"""Typed agent state for the Digital Courtroom graph.
+"""Agent state and message types for Automaton Auditor.
 
-Reducer design:
-- evidences: merge_evidences (Dict merge with list concatenation on key overlap)
-  prevents data loss when parallel detectives write to the same source key.
-- opinions: operator.add appends new opinions to the list without overwriting.
+State Management Rigor: TypedDict + Annotated reducers ensure parallel nodes
+can merge their outputs without overwriting each other. Each reducer defines
+how to combine the existing state value with an incoming update.
 """
+
+from __future__ import annotations
 
 import operator
 from typing import Annotated, Literal, Optional
@@ -14,31 +15,12 @@ from typing_extensions import TypedDict
 
 
 # -----------------------------------------------------------------------------
-# Custom reducer for Dict[str, List[Evidence]]
-# operator.ior would overwrite on key conflict; we concatenate lists instead.
-# -----------------------------------------------------------------------------
-
-
-def merge_evidences(
-    left: dict[str, list["Evidence"]], right: dict[str, list["Evidence"]]
-) -> dict[str, list["Evidence"]]:
-    """Merge evidences dicts: concatenate lists for overlapping keys."""
-    result = dict(left)
-    for key, items in right.items():
-        if key in result:
-            result[key] = result[key] + items
-        else:
-            result[key] = items
-    return result
-
-
-# -----------------------------------------------------------------------------
-# Evidence & Opinion Models
+# Evidence & judicial models
 # -----------------------------------------------------------------------------
 
 
 class Evidence(BaseModel):
-    """Evidence collected by a detective (RepoInvestigator, DocAnalyst, VisionInspector)."""
+    """Single piece of evidence collected by a detective (repo, docs, vision)."""
 
     goal: str
     found: bool
@@ -49,7 +31,7 @@ class Evidence(BaseModel):
 
 
 class JudicialOpinion(BaseModel):
-    """Opinion from a judge (Prosecutor, Defense, Tech Lead)."""
+    """Opinion from one judge (Prosecutor, Defense, TechLead) on a criterion."""
 
     judge: Literal["Prosecutor", "Defense", "TechLead"]
     criterion_id: str
@@ -58,31 +40,58 @@ class JudicialOpinion(BaseModel):
     cited_evidence: list[str]
 
 
+class CriterionResult(BaseModel):
+    """Synthesized result for one rubric criterion after chief justice."""
+
+    criterion_id: str
+    verdict: str  # e.g. PASS, FAIL, PARTIAL
+    summary: str
+    evidence_refs: list[str] = []
+
+
+class AuditReport(BaseModel):
+    """Final audit report: executive summary, criteria, remediation."""
+
+    executive_summary: str
+    criterion_breakdown: list[CriterionResult]
+    remediation_plan: str
+
+
 # -----------------------------------------------------------------------------
-# Agent State
+# Agent state
 # -----------------------------------------------------------------------------
 
 
 class AgentState(TypedDict, total=False):
-    """State passed through the Digital Courtroom graph.
+    """State passed through the graph. Reducers prevent parallel overwrites.
 
-    Uses Annotated reducers to prevent data loss during parallel execution:
-    - evidences: merge_evidences (concatenates lists on key overlap)
-    - opinions: operator.add (appends to list)
+    evidences: operator.ior merges update dict into existing. Each key (e.g.
+        "repo", "docs") is a source; parallel detectives write to different
+        keys, so ior preserves all. If two nodes wrote the same key, the
+        later update would overwrite (intended: one source per key).
+
+    opinions: operator.add concatenates lists. Each judge appends its list of
+        JudicialOpinions; nothing is overwritten, so all opinions are retained.
     """
 
-    # Inputs
+    # Inputs (can be set directly or via Targeting Protocol from context_builder)
     repo_url: str
     pdf_path: str
+    input: dict  # optional: { github_repo, pdf_report, pdf_images } for Targeting Protocol
+    self_audit: bool  # optional: when True, report saved only to report_onself_generated (CLI --self-audit)
 
-    # Rubric (loaded by context_builder)
+    # Loaded rubric and routed instructions (from ContextBuilder)
     rubric_dimensions: list[dict]
+    forensic_instruction: str
+    judicial_logic: str
+    synthesis_rules: dict
 
-    # Detective outputs: Dict[source, List[Evidence]]
-    evidences: Annotated[dict[str, list[Evidence]], merge_evidences]
+    # Detective outputs: source -> list of Evidence
+    evidences: Annotated[dict[str, list[Evidence]], operator.ior]
 
     # Judge outputs
     opinions: Annotated[list[JudicialOpinion], operator.add]
 
-    # Final output
-    final_report: str
+    # Synthesis and final output
+    criterion_results: list[CriterionResult]
+    final_report: Optional[AuditReport]

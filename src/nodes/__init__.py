@@ -1,1 +1,1 @@
-"""Graph nodes: detectives, judges, chief justice."""
+# Graph nodes
