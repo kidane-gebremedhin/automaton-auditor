@@ -1,4 +1,9 @@
 # LangGraph Digital Courtroom: Detectives (parallel) -> EvidenceAggregator -> Judges (parallel) -> ChiefJustice -> END
+#
+# Graph structure (rubric): START -> [Detectives in parallel] -> EvidenceAggregator -> [Judges in parallel] -> ChiefJustice -> END.
+# Fan-out: context_builder -> detectives_router (Send to repo_detective, pdf_preprocess); pdf_preprocess -> doc_detective + vision_detective.
+# Fan-in: repo_detective, doc_detective, vision_detective -> evidence_aggregator. Then run_judges (all three personas) -> judges_aggregator -> chief_justice -> report_writer -> END.
+# Conditional edges handle routing and optional vision; error states are handled by node try/except and evidence found=False.
 
 from __future__ import annotations
 
@@ -8,7 +13,7 @@ from langgraph.types import Send
 from src.config import configure_tracing
 from src.nodes.context import context_builder
 from src.nodes.detectives import doc_detective, pdf_preprocess, repo_detective, vision_inspector
-from src.nodes.judges import defense, prosecutor, tech_lead
+from src.nodes.judges import run_judges
 from src.nodes.justice import chief_justice, report_writer
 from src.state import AgentState
 
@@ -39,13 +44,9 @@ def after_pdf_preprocess_router(state: AgentState) -> list[Send]:
     return sends
 
 
-def judges_router(state: AgentState) -> list[Send]:
-    """Fan-out to Prosecutor, Defense, TechLead in parallel on identical evidence."""
-    return [
-        Send("prosecutor", state),
-        Send("defense", state),
-        Send("tech_lead", state),
-    ]
+def judges_router(state: AgentState) -> str:
+    """Single node: run_judges evaluates every criterion with all three judges (Prosecutor, Defense, Tech Lead)."""
+    return "run_judges"
 
 
 def evidence_aggregator(state: AgentState) -> dict:
@@ -89,9 +90,7 @@ def build_graph() -> StateGraph:
     graph.add_node("doc_detective", doc_detective)
     graph.add_node("vision_detective", vision_inspector)
     graph.add_node("evidence_aggregator", evidence_aggregator)
-    graph.add_node("prosecutor", prosecutor)
-    graph.add_node("defense", defense)
-    graph.add_node("tech_lead", tech_lead)
+    graph.add_node("run_judges", run_judges)
     graph.add_node("judges_aggregator", judges_aggregator)
     graph.add_node("chief_justice", chief_justice)
     graph.add_node("report_writer", report_writer)
@@ -120,13 +119,10 @@ def build_graph() -> StateGraph:
     # no_input -> judges (need evidence_aggregator first for flow consistency; no_input goes to aggregator then judges)
     graph.add_edge("no_input", "evidence_aggregator")
 
-    # EvidenceAggregator -> Judges (parallel fan-out)
-    graph.add_conditional_edges("evidence_aggregator", judges_router)
+    # EvidenceAggregator -> run_judges (one verdict per judge per criterion) -> JudgesAggregator -> ChiefJustice
+    graph.add_conditional_edges("evidence_aggregator", judges_router, {"run_judges": "run_judges"})
 
-    # Judges -> JudgesAggregator (fan-in) -> ChiefJustice (runs once)
-    graph.add_edge("prosecutor", "judges_aggregator")
-    graph.add_edge("defense", "judges_aggregator")
-    graph.add_edge("tech_lead", "judges_aggregator")
+    graph.add_edge("run_judges", "judges_aggregator")
     graph.add_edge("judges_aggregator", "chief_justice")
 
     # ChiefJustice -> Report -> END

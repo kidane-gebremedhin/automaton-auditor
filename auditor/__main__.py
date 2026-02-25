@@ -29,6 +29,7 @@ import src.config  # noqa: F401
 
 from src.graph import create_compiled_graph
 from src.state import AgentState
+from src.tools.repo_tools import CloneError, validate_github_url
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +51,13 @@ def main() -> int:
     if not args.repo and not args.pdf:
         print("Provide at least one of --repo or --pdf.", file=sys.stderr)
         return 1
+
+    if args.repo:
+        try:
+            validate_github_url(args.repo)
+        except CloneError as e:
+            print(str(e), file=sys.stderr)
+            return 1
 
     initial_state: AgentState = {
         "repo_url": args.repo or "",

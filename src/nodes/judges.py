@@ -80,12 +80,12 @@ def _evidence_for_prompt(evidences: dict[str, list[Evidence]]) -> str:
                 f"rationale={e.rationale!r} confidence={e.confidence}"
             )
             if e.content:
-                parts.append(f"  content: {e.content[:500]}")
+                parts.append(f"  content: {e.content[:1200]}")
     return "\n".join(parts) if parts else "(no evidence)"
 
 
 # -----------------------------------------------------------------------------
-# Structured output with retry
+# Structured output with retry (rubric: .with_structured_output(JudicialOpinion), retry on malformed output)
 # -----------------------------------------------------------------------------
 
 MAX_PARSE_RETRIES = 3
@@ -96,18 +96,34 @@ def _invoke_judge(
     judge_name: Literal["Prosecutor", "Defense", "TechLead"],
     evidence_text: str,
     rubric_summary: str,
+    criterion_id: str | None = None,
+    dimension_name: str = "",
+    dimension_description: str = "",
 ) -> JudicialOpinion | None:
-    """Invoke LLM with structured output; retry on parse failure."""
+    """Invoke LLM with structured output; retry on parse failure.
+
+    If criterion_id is set, the prompt instructs the judge to evaluate only that criterion
+    and the returned opinion is forced to that criterion_id (one verdict per judge per criterion).
+    """
     from langchain_openai import ChatOpenAI
 
     llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
     structured_llm = llm.with_structured_output(JudicialOpinion)
 
-    user_content = (
-        f"Rubric (summary): {rubric_summary}\n\n"
-        f"Evidence (identical for all judges):\n{evidence_text}\n\n"
-        "Produce one JudicialOpinion with score (0-10), argument, and cited_evidence."
-    )
+    if criterion_id:
+        user_content = (
+            f"Rubric context: {rubric_summary[:400]}\n\n"
+            f"You must evaluate **only** this criterion: **{criterion_id}** ({dimension_name or criterion_id}).\n"
+            f"Description: {dimension_description[:500]}\n\n"
+            f"Evidence:\n{evidence_text}\n\n"
+            f"Produce exactly one JudicialOpinion with criterion_id={criterion_id!r}, score (0-10), argument, and cited_evidence."
+        )
+    else:
+        user_content = (
+            f"Rubric (summary): {rubric_summary}\n\n"
+            f"Evidence (identical for all judges):\n{evidence_text}\n\n"
+            "Produce one JudicialOpinion with score (0-10), argument, and cited_evidence."
+        )
 
     last_error: Exception | None = None
     for attempt in range(MAX_PARSE_RETRIES):
@@ -119,10 +135,11 @@ def _invoke_judge(
                 ]
             )
             if isinstance(out, JudicialOpinion):
-                # Ensure judge field matches
+                # Force criterion_id when we asked for a specific criterion
+                cid = criterion_id if criterion_id else out.criterion_id
                 return JudicialOpinion(
                     judge=judge_name,
-                    criterion_id=out.criterion_id,
+                    criterion_id=cid,
                     score=out.score,
                     argument=out.argument,
                     cited_evidence=out.cited_evidence or [],
@@ -161,6 +178,9 @@ def _run_judge(
     state: AgentState,
     judge_name: Literal["Prosecutor", "Defense", "TechLead"],
     system_prompt: str,
+    criterion_id: str | None = None,
+    dimension_name: str = "",
+    dimension_description: str = "",
 ) -> dict:
     evidences = state.get("evidences") or {}
     rubric_dimensions = state.get("rubric_dimensions") or []
@@ -170,15 +190,66 @@ def _run_judge(
         rubric_summary = f"Judicial logic (from rubric): {judicial_logic}\n\nCriteria: {rubric_summary}"
 
     evidence_text = _evidence_for_prompt(evidences)
-    opinion = _invoke_judge(system_prompt, judge_name, evidence_text, rubric_summary)
+    opinion = _invoke_judge(
+        system_prompt,
+        judge_name,
+        evidence_text,
+        rubric_summary,
+        criterion_id=criterion_id,
+        dimension_name=dimension_name,
+        dimension_description=dimension_description,
+    )
 
     if opinion is None:
         return {"opinions": []}
     return {"opinions": [opinion]}
 
 
+def run_judges(state: AgentState) -> dict:
+    """Run Prosecutor, Defense, and Tech Lead once per rubric criterion.
+
+    Ensures each judge has a verdict on every criterion (e.g. Git Forensic Analysis,
+    Graph Orchestration Architecture). Returns opinions merged for all criteria.
+    """
+    rubric_dimensions = state.get("rubric_dimensions") or []
+    if not rubric_dimensions:
+        # Fallback: single run per judge (legacy)
+        all_opinions: list[JudicialOpinion] = []
+        for judge_name, system_prompt in (
+            ("Prosecutor", PROSECUTOR_SYSTEM),
+            ("Defense", DEFENSE_SYSTEM),
+            ("TechLead", TECH_LEAD_SYSTEM),
+        ):
+            result = _run_judge(state, judge_name, system_prompt)
+            all_opinions.extend(result.get("opinions") or [])
+        return {"opinions": all_opinions}
+
+    all_opinions = []
+    for dim in rubric_dimensions:
+        cid = dim.get("id") or ""
+        name = dim.get("name") or cid.replace("_", " ").title()
+        desc = dim.get("description") or ""
+        if not cid:
+            continue
+        for judge_name, system_prompt in (
+            ("Prosecutor", PROSECUTOR_SYSTEM),
+            ("Defense", DEFENSE_SYSTEM),
+            ("TechLead", TECH_LEAD_SYSTEM),
+        ):
+            result = _run_judge(
+                state,
+                judge_name,
+                system_prompt,
+                criterion_id=cid,
+                dimension_name=name,
+                dimension_description=desc,
+            )
+            all_opinions.extend(result.get("opinions") or [])
+    return {"opinions": all_opinions}
+
+
 # -----------------------------------------------------------------------------
-# Parallel hub: run all judges on identical evidence
+# Legacy: single-opinion judge nodes (used if graph fans out to prosecutor/defense/tech_lead)
 # -----------------------------------------------------------------------------
 
 

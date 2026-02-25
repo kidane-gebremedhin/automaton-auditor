@@ -290,10 +290,19 @@ FILE_PATH_PATTERN = re.compile(
     r"|\b[\w\-]+/[\w./\-]+\.[a-zA-Z]{2,4}\b"
 )
 
+# Paths that look like local/absolute (not repo-relative); exclude from "mentioned" so they aren't counted as hallucinated.
+NON_REPO_PATH_PREFIXES = ("home/", "users/", "tmp/", "temp/", "downloads/", "desktop/", "/tmp", "/home", "/users")
+
 
 def extract_file_paths(text: str) -> list[str]:
-    """Extract file paths mentioned in report (e.g. src/tools/ast_parser.py)."""
-    return list(dict.fromkeys(FILE_PATH_PATTERN.findall(text)))
+    """Extract file paths mentioned in report (e.g. src/tools/ast_parser.py).
+    Excludes paths that look like local/absolute (home/, Downloads/, etc.) so they are not counted as hallucinated."""
+    raw = list(dict.fromkeys(FILE_PATH_PATTERN.findall(text)))
+    normalized = [p.replace("\\", "/").strip().lower() for p in raw]
+    return [
+        p for p, n in zip(raw, normalized)
+        if not any(n.startswith(prefix) or prefix in n for prefix in NON_REPO_PATH_PREFIXES)
+    ]
 
 
 class PathExtractionResult(BaseModel):

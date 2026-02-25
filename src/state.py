@@ -41,12 +41,20 @@ class JudicialOpinion(BaseModel):
 
 
 class CriterionResult(BaseModel):
-    """Synthesized result for one rubric criterion after chief justice."""
+    """Synthesized result for one rubric criterion after chief justice.
+
+    Aligns with Digital Courtroom spec: Verdict, Dissent, Remediation per criterion.
+    """
 
     criterion_id: str
-    verdict: str  # e.g. PASS, FAIL, PARTIAL
+    verdict: str  # PASS, FAIL, PARTIAL
     summary: str
     evidence_refs: list[str] = []
+    # Optional fields for full report structure (Executive Summary -> Criterion Breakdown -> Remediation Plan)
+    dimension_name: str = ""  # Human-readable from rubric (e.g. "Git Forensic Analysis")
+    final_score: float | None = None  # Weighted score (0-10); report may show as 1-5
+    dissent_summary: str | None = None  # Required when score variance > 2 (Prosecutor vs Defense vs Tech Lead)
+    remediation: str = ""  # File-level instructions for this criterion
 
 
 class AuditReport(BaseModel):

@@ -28,90 +28,90 @@ def _compute_final_score(criterion_breakdown: list[CriterionResult]) -> float:
     return total / len(criterion_breakdown)
 
 
-def _dissent_summary(opinions: list[JudicialOpinion]) -> str:
-    """Summarize dissent: criteria where judge scores differ by >= 3."""
-    by_criterion: dict[str, list[JudicialOpinion]] = defaultdict(list)
+def _score_1_to_5(score_0_10: float) -> int:
+    """Map judge/criterion score from 0–10 scale to strict 1–5 scale (Automation Auditor Rubric)."""
+    return max(1, min(5, round((score_0_10 / 10.0) * 5)))
+
+
+def _one_opinion_per_judge(opinions: list[JudicialOpinion]) -> list[JudicialOpinion]:
+    """Keep at most one opinion per judge (first occurrence). Ensures one verdict per judge per criterion."""
+    seen: set[str] = set()
+    out: list[JudicialOpinion] = []
     for op in opinions:
-        by_criterion[op.criterion_id].append(op)
-    lines: list[str] = []
-    for cid, ops in by_criterion.items():
-        if len(ops) < 2:
-            continue
-        scores = [o.score for o in ops]
-        if max(scores) - min(scores) >= 3:
-            lines.append(f"- **{cid}**: scores {scores} (Prosecutor/Defense/TechLead or subset)")
-    return "\n".join(lines) if lines else "No material dissent (all criteria had low score variance)."
+        if op.judge not in seen:
+            seen.add(op.judge)
+            out.append(op)
+    return out
 
 
 def serialize_report_to_markdown(
     report: AuditReport,
     opinions: list[JudicialOpinion] | None = None,
 ) -> str:
-    """Convert AuditReport and optional opinions to full Markdown.
+    """Convert AuditReport and optional opinions to Markdown.
 
-    Sections: Executive Summary, Criterion Breakdown (up to 10), Final Score,
-    Judge Opinions, Dissent Summary, Remediation, Final Remediation Plan.
+    Follows Digital Courtroom / challenge key points:
+    1. Executive Summary — workflow (Detective → Dialectical Bench → Chief Justice), overall verdict, aggregate score on 1–5 scale
+    2. Criterion Breakdown — per rubric dimension: final score (1–5), Dialectical Bench (Prosecutor, Defense, Tech Lead) with cited evidence, dissent where applicable
+    3. Remediation Plan — specific, file-level instructions for the developer, grouped by criterion
     """
     opinions = opinions or []
+    by_criterion: dict[str, list[JudicialOpinion]] = defaultdict(list)
+    for op in opinions:
+        by_criterion[op.criterion_id].append(op)
+
+    aggregate_0_1 = _compute_final_score(report.criterion_breakdown)
+    aggregate_1_5 = _score_1_to_5(aggregate_0_1 * 10)  # 0–1 → 0–10 → 1–5
+    pct = round(aggregate_0_1 * 100, 1)
+
     parts: list[str] = []
 
-    # Title
     parts.append("# Audit Report\n\n")
 
-    # 1. Executive Summary
+    # 1. Executive Summary — overall verdict and aggregate score (1–5 scale)
     parts.append("## Executive Summary\n\n")
+    parts.append(
+        "This audit was conducted using the **Digital Courtroom** workflow: "
+        "the **Detective Layer** (RepoInvestigator, DocAnalyst, VisionInspector) collected forensic evidence in parallel; "
+        "evidence was aggregated (Fan-In); the **Dialectical Bench** (Prosecutor, Defense, Tech Lead) evaluated it concurrently (Fan-Out); "
+        "the **Chief Justice** applied deterministic synthesis rules (Rule of Security, Rule of Evidence, functionality weight) to produce the final verdict.\n\n"
+    )
     parts.append(report.executive_summary.strip())
-    parts.append("\n\n")
+    parts.append(f"\n\n**Aggregate score**: {aggregate_1_5}/5 ({pct}% of criteria passed or partial).\n\n")
 
-    # 2. Criterion Breakdown (up to 10 sections)
+    # 2. Criterion Breakdown — one section per rubric dimension; numeric score (1–5), one verdict per judge
     parts.append("## Criterion Breakdown\n\n")
     for i, c in enumerate(report.criterion_breakdown[:10]):
-        parts.append(f"### {i + 1}. {c.criterion_id}\n\n")
-        parts.append(f"- **Verdict**: {c.verdict}\n")
-        parts.append(f"- **Summary**: {c.summary}\n")
-        if c.evidence_refs:
-            parts.append(f"- **Evidence refs**: {', '.join(c.evidence_refs[:5])}\n")
+        title = c.dimension_name or c.criterion_id.replace("_", " ").title()
+        parts.append(f"### {i + 1}. {title}\n\n")
+
+        # Numeric verdict only (score 1–5); no PASS/PARTIAL/FAIL as primary
+        if c.final_score is not None:
+            score_1_5 = _score_1_to_5(c.final_score)
+            parts.append(f"- **Verdict (score)**: {score_1_5}/5\n")
+        else:
+            parts.append(f"- **Verdict (score)**: —\n")
+
+        if c.dissent_summary:
+            parts.append(f"- **Dissent summary**: {c.dissent_summary}\n")
+
+        ops = _one_opinion_per_judge(by_criterion.get(c.criterion_id, []))
+        if ops:
+            parts.append("\n**Dialectical Bench** (one verdict per judge, with cited evidence)\n\n")
+            for op in ops:
+                s = _score_1_to_5(float(op.score))
+                parts.append(f"- **{op.judge}** (verdict {s}/5): {op.argument}\n")
+                if op.cited_evidence:
+                    parts.append(f"  Cited: {', '.join(op.cited_evidence[:5])}\n")
+            parts.append("\n")
+
         parts.append("\n")
     if len(report.criterion_breakdown) > 10:
         parts.append(f"*... and {len(report.criterion_breakdown) - 10} more criteria.*\n\n")
 
-    # 3. Final Score
-    score = _compute_final_score(report.criterion_breakdown)
-    pct = round(score * 100, 1)
-    parts.append("## Final Score\n\n")
-    parts.append(f"{pct}% (score: {score:.2f} / 1.00)\n\n")
-
-    # 4. Judge Opinions
-    parts.append("## Judge Opinions\n\n")
-    by_criterion: dict[str, list[JudicialOpinion]] = defaultdict(list)
-    for op in opinions:
-        by_criterion[op.criterion_id].append(op)
-    for cid in sorted(by_criterion.keys()):
-        parts.append(f"### {cid}\n\n")
-        for op in by_criterion[cid]:
-            parts.append(f"- **{op.judge}** (score {op.score}): {op.argument}\n")
-            if op.cited_evidence:
-                parts.append(f"  Cited: {', '.join(op.cited_evidence[:3])}\n")
-        parts.append("\n")
-    if not opinions:
-        parts.append("No judge opinions in state.\n\n")
-
-    # 5. Dissent Summary
-    parts.append("## Dissent Summary\n\n")
-    parts.append(_dissent_summary(opinions))
-    parts.append("\n\n")
-
-    # 6. Remediation (same as criterion breakdown FAIL/PARTIAL items, listed again)
-    parts.append("## Remediation\n\n")
-    for c in report.criterion_breakdown:
-        if c.verdict in ("FAIL", "PARTIAL"):
-            parts.append(f"- **{c.criterion_id}** ({c.verdict}): {c.summary}\n")
-    if not any(c.verdict in ("FAIL", "PARTIAL") for c in report.criterion_breakdown):
-        parts.append("No remediation required.\n")
-    parts.append("\n")
-
-    # 7. Final Remediation Plan
-    parts.append("## Final Remediation Plan\n\n")
+    # 3. Remediation Plan — specific, file-level instructions for the developer, grouped by criterion
+    parts.append("## Remediation Plan\n\n")
+    parts.append("*Specific, file-level remediation for the developer, grouped by criterion.*\n\n")
     parts.append(report.remediation_plan.strip())
     parts.append("\n")
 
