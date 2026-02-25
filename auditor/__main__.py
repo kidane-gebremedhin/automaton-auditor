@@ -6,8 +6,18 @@ Runs full swarm, saves report, logs LangSmith trace when configured.
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
 from pathlib import Path
+
+# Show progress from PDF conversion (vision_tools, doc_tools)
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+# Force CPU for Docling/RapidOCR (PyTorch) when GPU is incompatible (e.g. CUDA 5.0).
+# Prevents stall/hang on first PDF processing. Set CUDA_VISIBLE_DEVICES=0 to use GPU if supported.
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 # Project root on path so "src" resolves when running from any cwd
 _project_root = Path(__file__).resolve().parent.parent

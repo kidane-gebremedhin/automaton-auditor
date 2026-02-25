@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+# Docling convert can be very slow on CPU; cap wait to avoid indefinite stall.
+PDF_CONVERT_TIMEOUT_SEC = 90
 
 DiagramClassification = Literal["StateGraph diagram", "Linear pipeline", "Generic flowchart"]
 
@@ -47,6 +55,12 @@ def extract_images_from_pdf(path: str) -> tuple[list[str], Path | None]:
     tmp_dir = Path(tempfile.mkdtemp(prefix="vision_tools_"))
     image_paths: list[str] = []
 
+    # Req: VisionInspector "running it to get results is optional". Without FULL_PDF we skip heavy conversion.
+    import os
+    if os.environ.get("AUDITOR_FULL_PDF", "").strip() not in ("1", "true", "yes"):
+        logger.info("Vision: AUDITOR_FULL_PDF not set; skipping image extraction.")
+        return image_paths, tmp_dir
+
     try:
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import PdfPipelineOptions
@@ -58,13 +72,19 @@ def extract_images_from_pdf(path: str) -> tuple[list[str], Path | None]:
     pipeline_options.images_scale = 2.0
     pipeline_options.generate_page_images = True
     pipeline_options.generate_picture_images = True
-
+    pipeline_options.document_timeout = float(PDF_CONVERT_TIMEOUT_SEC)
     converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-        }
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
-    result = converter.convert(str(path_obj))
+    logger.info("Vision: converting PDF to extract images (timeout=%ds)...", PDF_CONVERT_TIMEOUT_SEC)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(converter.convert, str(path_obj))
+            result = future.result(timeout=PDF_CONVERT_TIMEOUT_SEC)
+    except FuturesTimeoutError:
+        logger.warning("Vision: PDF conversion timed out after %ds; skipping image extraction.", PDF_CONVERT_TIMEOUT_SEC)
+        return image_paths, tmp_dir
+    logger.info("Vision: PDF conversion done, extracting page/figure images.")
     doc_name = path_obj.stem
     doc = result.document
 

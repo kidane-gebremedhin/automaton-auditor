@@ -61,23 +61,61 @@ def context_builder(
         rubric = load_rubric(path)
     except (FileNotFoundError, json.JSONDecodeError):
         rubric = {
+            "dimensions": [],
             "criteria": [],
             "forensic_instruction": "",
             "judicial_logic": "",
             "synthesis_rules": {},
+            "synthesis_config": {},
             "targeting": dict(TARGETING),
         }
 
-    criteria = rubric.get("criteria", [])
-    forensic_instruction = rubric.get("forensic_instruction", "")
-    judicial_logic = rubric.get("judicial_logic", "")
-    synthesis_rules = rubric.get("synthesis_rules", {})
+    # Support v3 format (dimensions) and legacy (criteria)
+    dimensions = rubric.get("dimensions") or rubric.get("criteria", [])
+    if dimensions and isinstance(dimensions[0], dict):
+        # v3: dimensions have id, name, target_artifact, forensic_instruction, success_pattern, failure_pattern
+        rubric_dimensions = [
+            {
+                "id": d.get("id", ""),
+                "name": d.get("name", ""),
+                "description": d.get("success_pattern", "") or d.get("forensic_instruction", ""),
+            }
+            for d in dimensions
+        ]
+        forensic_parts = []
+        for d in dimensions:
+            fi = d.get("forensic_instruction", "")
+            sp = d.get("success_pattern", "")
+            fp = d.get("failure_pattern", "")
+            if fi or sp or fp:
+                forensic_parts.append(
+                    f"[{d.get('id', '')}] {fi}\nSuccess: {sp}\nFailure: {fp}"
+                )
+        forensic_instruction = (
+            "Targeting: github_repo → RepoInvestigator, pdf_report → DocAnalyst, pdf_images → VisionInspector. "
+            "Collect evidence per dimension:\n\n" + "\n\n".join(forensic_parts)
+        )
+        sr_narrative = rubric.get("synthesis_rules", {})
+        judicial_logic = (
+            "Judges evaluate evidence against rubric criteria. Output JudicialOpinion per criterion: "
+            "score 0-10, argument, cited_evidence. Enforce Hallucination Liability (cite only provided evidence) "
+            "and Orchestration Fraud (claim parallel/fan-out only if evidenced). "
+            "Prosecutor: strict. Defense: charitable. TechLead: technical rigor. "
+            "Synthesis rules: " + "; ".join(f"{k}: {v}" for k, v in (sr_narrative or {}).items())
+        )
+        # Chief Justice needs numeric thresholds from synthesis_config
+        synthesis_rules = {**(rubric.get("synthesis_config") or {}), **(sr_narrative or {})}
+    else:
+        rubric_dimensions = dimensions
+        forensic_instruction = rubric.get("forensic_instruction", "")
+        judicial_logic = rubric.get("judicial_logic", "")
+        synthesis_rules = rubric.get("synthesis_rules", {})
 
     # Apply Targeting Protocol: set repo_url, pdf_path from input
     targeting_updates = apply_targeting(state, rubric)
 
     return {
-        "rubric_dimensions": criteria,
+        "rubric_dimensions": rubric_dimensions,
         "forensic_instruction": forensic_instruction,
         "judicial_logic": judicial_logic,
         "synthesis_rules": synthesis_rules,

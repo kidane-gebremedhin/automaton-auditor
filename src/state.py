@@ -58,6 +58,16 @@ class AuditReport(BaseModel):
 
 
 # -----------------------------------------------------------------------------
+# Reducers
+# -----------------------------------------------------------------------------
+
+
+def _last_wins(a: object, b: object) -> object:
+    """Reducer: keep the second value if not None (so fan-in multiple writes don't error)."""
+    return b if b is not None else a
+
+
+# -----------------------------------------------------------------------------
 # Agent state
 # -----------------------------------------------------------------------------
 
@@ -77,6 +87,11 @@ class AgentState(TypedDict, total=False):
     # Inputs (can be set directly or via Targeting Protocol from context_builder)
     repo_url: str
     pdf_path: str
+
+    # Cached PDF conversion (set by pdf_preprocess so doc/vision don't convert in parallel)
+    pdf_doc_context: dict  # {"path": str, "markdown": str, "chunks": list[str]}
+    pdf_image_paths: list
+    pdf_cleanup_path: str
     input: dict  # optional: { github_repo, pdf_report, pdf_images } for Targeting Protocol
     self_audit: bool  # optional: when True, report saved only to report_onself_generated (CLI --self-audit)
 
@@ -92,6 +107,6 @@ class AgentState(TypedDict, total=False):
     # Judge outputs
     opinions: Annotated[list[JudicialOpinion], operator.add]
 
-    # Synthesis and final output
-    criterion_results: list[CriterionResult]
-    final_report: Optional[AuditReport]
+    # Synthesis and final output (last-wins reducer: when chief_justice runs multiple times in fan-in, keep last)
+    criterion_results: Annotated[list[CriterionResult], _last_wins]
+    final_report: Annotated[Optional[AuditReport], _last_wins]

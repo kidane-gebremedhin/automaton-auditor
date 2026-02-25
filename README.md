@@ -57,6 +57,13 @@ Tracing is off by default. To enable:
 
 No API keys are hardcoded; all values are read from the environment.
 
+## PDF and Vision (per Week 2 requirements)
+
+By default, PDF text is extracted with **pypdf** (no Docling) so the run does not stall on CPU. Diagram analysis (VisionInspector) is skipped unless explicitly enabled.
+
+- **`AUDITOR_FULL_PDF=1`** — Use Docling for PDF conversion (OCR, layout, page images). Enables Vision diagram classification; can be slow on CPU.
+- **`AUDITOR_SKIP_VISION=1`** — Skip the VisionInspector node entirely (req: "running it to get results is optional").
+
 ## Dependencies
 
-Managed by uv: langchain, langgraph, pydantic, python-dotenv, openai, docling. Python `ast` is used for code analysis (stdlib; no extra package).
+Managed by uv: langchain, langgraph, pydantic, python-dotenv, openai, docling, pypdf. Python `ast` is used for code analysis (stdlib; no extra package).

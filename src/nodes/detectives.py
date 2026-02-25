@@ -1,4 +1,4 @@
-"""Detective nodes: RepoInvestigator, DocAnalyst, VisionInspector."""
+"""Detective nodes: RepoInvestigator, DocAnalyst, VisionInspector, pdf_preprocess."""
 
 from __future__ import annotations
 
@@ -6,6 +6,38 @@ import shutil
 from pathlib import Path
 
 from src.state import AgentState, Evidence
+
+
+def pdf_preprocess(state: AgentState) -> dict:
+    """Convert PDF once with timeout; store result in state for doc and vision detectives.
+
+    Prevents two parallel Docling conversions (which can stall or deadlock on CPU).
+    """
+    pdf_path = state.get("pdf_path")
+    if not pdf_path:
+        return {}
+
+    from src.tools.doc_tools import DocContext, convert_pdf_once
+
+    try:
+        doc_context, image_paths, cleanup_path = convert_pdf_once(pdf_path)
+    except (FileNotFoundError, RuntimeError) as e:
+        # Store empty so doc/vision use cache and do not call convert again
+        return {
+            "pdf_doc_context": {"path": str(pdf_path), "markdown": "", "chunks": []},
+            "pdf_image_paths": [],
+            "pdf_cleanup_path": "",
+        }
+
+    return {
+        "pdf_doc_context": {
+            "path": doc_context.path,
+            "markdown": doc_context.markdown,
+            "chunks": doc_context.chunks,
+        },
+        "pdf_image_paths": image_paths,
+        "pdf_cleanup_path": str(cleanup_path) if cleanup_path else "",
+    }
 
 
 def repo_detective(state: AgentState) -> dict:
@@ -79,28 +111,36 @@ def repo_detective(state: AgentState) -> dict:
 
 
 def doc_detective(state: AgentState) -> dict:
-    """DocAnalyst: ingest PDF, theoretical depth, path extraction; return evidences["docs"]. Handles missing PDF."""
+    """DocAnalyst: ingest PDF (or use cached pdf_doc_context), theoretical depth, path extraction."""
     pdf_path = state.get("pdf_path")
     if not pdf_path:
         return {"evidences": {"docs": []}}
 
-    from src.tools.doc_tools import detect_theoretical_depth, extract_and_verify_paths, ingest_pdf
+    from src.tools.doc_tools import DocContext, detect_theoretical_depth, extract_and_verify_paths, ingest_pdf
 
     evidences: list[Evidence] = []
-    try:
-        context = ingest_pdf(pdf_path)
-    except (FileNotFoundError, RuntimeError) as e:
-        evidences.append(
-            Evidence(
-                goal="document ingest",
-                found=False,
-                content=None,
-                location=str(pdf_path),
-                rationale=str(e),
-                confidence=1.0,
-            )
+    cached = state.get("pdf_doc_context")
+    if isinstance(cached, dict) and "markdown" in cached:
+        context = DocContext(
+            path=cached.get("path", str(pdf_path)),
+            markdown=cached.get("markdown", ""),
+            chunks=cached.get("chunks", []),
         )
-        return {"evidences": {"docs": evidences}}
+    else:
+        try:
+            context = ingest_pdf(pdf_path)
+        except (FileNotFoundError, RuntimeError) as e:
+            evidences.append(
+                Evidence(
+                    goal="document ingest",
+                    found=False,
+                    content=None,
+                    location=str(pdf_path),
+                    rationale=str(e),
+                    confidence=1.0,
+                )
+            )
+            return {"evidences": {"docs": evidences}}
 
     td = detect_theoretical_depth(context)
     evidences.append(
@@ -128,11 +168,7 @@ def doc_detective(state: AgentState) -> dict:
 
 
 def vision_inspector(state: AgentState) -> dict:
-    """VisionInspector: extract images from PDF, ask multimodal if diagram shows fan-out/fan-in.
-
-    Uses extract_images_from_pdf and classify_diagram_with_vision. Returns
-    classification: StateGraph diagram | Linear pipeline | Generic flowchart.
-    """
+    """VisionInspector: use cached pdf_image_paths or extract from PDF; classify diagrams."""
     pdf_path = state.get("pdf_path")
     if not pdf_path:
         return {"evidences": {"vision": []}}
@@ -147,32 +183,39 @@ def vision_inspector(state: AgentState) -> dict:
     image_paths: list[str] = []
     cleanup_path: Path | None = None
 
-    try:
-        image_paths, cleanup_path = extract_images_from_pdf(pdf_path)
-    except FileNotFoundError as e:
-        evidences.append(
-            Evidence(
-                goal="diagram architecture",
-                found=False,
-                content=None,
-                location=str(pdf_path),
-                rationale=str(e),
-                confidence=1.0,
+    # Use cache from pdf_preprocess when present (avoids second conversion)
+    if "pdf_image_paths" in state:
+        image_paths = list(state["pdf_image_paths"]) if state["pdf_image_paths"] else []
+        cp = state.get("pdf_cleanup_path")
+        if cp and Path(cp).exists():
+            cleanup_path = Path(cp)
+    else:
+        try:
+            image_paths, cleanup_path = extract_images_from_pdf(pdf_path)
+        except FileNotFoundError as e:
+            evidences.append(
+                Evidence(
+                    goal="diagram architecture",
+                    found=False,
+                    content=None,
+                    location=str(pdf_path),
+                    rationale=str(e),
+                    confidence=1.0,
+                )
             )
-        )
-        return {"evidences": {"vision": evidences}}
-    except Exception as e:
-        evidences.append(
-            Evidence(
-                goal="diagram architecture",
-                found=False,
-                content=None,
-                location=str(pdf_path),
-                rationale=f"image extraction failed: {e}",
-                confidence=1.0,
+            return {"evidences": {"vision": evidences}}
+        except Exception as e:
+            evidences.append(
+                Evidence(
+                    goal="diagram architecture",
+                    found=False,
+                    content=None,
+                    location=str(pdf_path),
+                    rationale=f"image extraction failed: {e}",
+                    confidence=1.0,
+                )
             )
-        )
-        return {"evidences": {"vision": evidences}}
+            return {"evidences": {"vision": evidences}}
 
     try:
         if not image_paths:

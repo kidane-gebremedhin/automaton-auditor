@@ -87,12 +87,16 @@ def functionality_weight(opinions: list[JudicialOpinion]) -> float:
     return total / wsum if wsum else 0.0
 
 
-def dissent_requirement(opinions: list[JudicialOpinion]) -> bool:
+def dissent_requirement(
+    opinions: list[JudicialOpinion],
+    synthesis_rules: dict | None = None,
+) -> bool:
     """True if there is material dissent (variance above threshold)."""
     if len(opinions) < 2:
         return False
+    threshold = (synthesis_rules or {}).get("variance_threshold", VARIANCE_HIGH_THRESHOLD)
     scores = [o.score for o in opinions]
-    return max(scores) - min(scores) >= VARIANCE_HIGH_THRESHOLD
+    return max(scores) - min(scores) >= threshold
 
 
 def variance_re_evaluation(
@@ -150,7 +154,7 @@ def _synthesize_criterion(
     weighted = functionality_weight(opinions)
 
     # 4) Dissent
-    dissent = dissent_requirement(opinions)
+    dissent = dissent_requirement(opinions, synthesis_rules)
 
     # 5) Variance re-evaluation (when no opinions, use fact verdict or FAIL)
     if not opinions:

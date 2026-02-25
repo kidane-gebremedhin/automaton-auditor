@@ -107,14 +107,16 @@ def clone_repo_sandboxed(repo_url: str, target_dir: str | Path | None = None) ->
 
     if target_dir is not None:
         parent = Path(target_dir)
+        clone_into = parent / "repo"
         cleanup_path = None
     else:
         parent = Path(tempfile.mkdtemp(prefix="repo_tools_"))
+        clone_into = parent / "repo"  # non-existing: git creates it and puts content inside
         cleanup_path = parent
 
     try:
         result = subprocess.run(
-            ["git", "clone", "--depth", "1", "--quiet", repo_url, str(parent)],
+            ["git", "clone", "--depth", "1", "--quiet", repo_url, str(clone_into)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -137,14 +139,13 @@ def clone_repo_sandboxed(repo_url: str, target_dir: str | Path | None = None) ->
             shutil.rmtree(cleanup_path, ignore_errors=True)
         raise CloneError(f"git clone failed: {err.strip()}")
 
-    subdirs = [d for d in parent.iterdir() if d.is_dir()]
-    if len(subdirs) != 1:
+    # clone_into was non-existing, so git created it and put repo content there.
+    if not clone_into.exists():
         if cleanup_path is not None:
             import shutil
             shutil.rmtree(cleanup_path, ignore_errors=True)
-        raise CloneError("unexpected clone layout (expected single subdir)")
-
-    repo_path = str(subdirs[0].resolve())
+        raise CloneError("git clone did not create target directory")
+    repo_path = str(clone_into.resolve())
     return repo_path, cleanup_path
 
 

@@ -7,7 +7,7 @@ from langgraph.types import Send
 
 from src.config import configure_tracing
 from src.nodes.context import context_builder
-from src.nodes.detectives import doc_detective, repo_detective, vision_inspector
+from src.nodes.detectives import doc_detective, pdf_preprocess, repo_detective, vision_inspector
 from src.nodes.judges import defense, prosecutor, tech_lead
 from src.nodes.justice import chief_justice, report_writer
 from src.state import AgentState
@@ -21,12 +21,20 @@ configure_tracing()
 
 
 def detectives_router(state: AgentState) -> list[Send]:
-    """Fan-out to Repo, Doc, Vision in parallel. Missing PDF: skip doc/vision when no pdf_path."""
+    """Fan-out to Repo and/or PDF preprocess. PDF runs once then fans to doc+vision."""
     sends: list[Send] = []
     if state.get("repo_url"):
         sends.append(Send("repo_detective", state))
     if state.get("pdf_path"):
-        sends.append(Send("doc_detective", state))
+        sends.append(Send("pdf_preprocess", state))
+    return sends
+
+
+def after_pdf_preprocess_router(state: AgentState) -> list[Send]:
+    """After single PDF conversion, fan-out to doc and optionally vision (req: execution optional)."""
+    import os
+    sends: list[Send] = [Send("doc_detective", state)]
+    if os.environ.get("AUDITOR_SKIP_VISION", "").strip() not in ("1", "true", "yes"):
         sends.append(Send("vision_detective", state))
     return sends
 
@@ -42,6 +50,11 @@ def judges_router(state: AgentState) -> list[Send]:
 
 def evidence_aggregator(state: AgentState) -> dict:
     """Fan-in: no-op; state already merged by reducers from parallel detectives."""
+    return {}
+
+
+def judges_aggregator(state: AgentState) -> dict:
+    """Fan-in: no-op; state already merged by reducers from parallel judges. Ensures chief_justice runs once."""
     return {}
 
 
@@ -72,12 +85,14 @@ def build_graph() -> StateGraph:
     # Nodes
     graph.add_node("context_builder", context_builder)
     graph.add_node("repo_detective", repo_detective)
+    graph.add_node("pdf_preprocess", pdf_preprocess)
     graph.add_node("doc_detective", doc_detective)
     graph.add_node("vision_detective", vision_inspector)
     graph.add_node("evidence_aggregator", evidence_aggregator)
     graph.add_node("prosecutor", prosecutor)
     graph.add_node("defense", defense)
     graph.add_node("tech_lead", tech_lead)
+    graph.add_node("judges_aggregator", judges_aggregator)
     graph.add_node("chief_justice", chief_justice)
     graph.add_node("report_writer", report_writer)
     graph.add_node("no_input", no_input_handler)
@@ -98,6 +113,7 @@ def build_graph() -> StateGraph:
 
     # Detectives -> EvidenceAggregator (fan-in)
     graph.add_edge("repo_detective", "evidence_aggregator")
+    graph.add_conditional_edges("pdf_preprocess", after_pdf_preprocess_router)
     graph.add_edge("doc_detective", "evidence_aggregator")
     graph.add_edge("vision_detective", "evidence_aggregator")
 
@@ -107,10 +123,11 @@ def build_graph() -> StateGraph:
     # EvidenceAggregator -> Judges (parallel fan-out)
     graph.add_conditional_edges("evidence_aggregator", judges_router)
 
-    # Judges -> ChiefJustice (fan-in)
-    graph.add_edge("prosecutor", "chief_justice")
-    graph.add_edge("defense", "chief_justice")
-    graph.add_edge("tech_lead", "chief_justice")
+    # Judges -> JudgesAggregator (fan-in) -> ChiefJustice (runs once)
+    graph.add_edge("prosecutor", "judges_aggregator")
+    graph.add_edge("defense", "judges_aggregator")
+    graph.add_edge("tech_lead", "judges_aggregator")
+    graph.add_edge("judges_aggregator", "chief_justice")
 
     # ChiefJustice -> Report -> END
     graph.add_edge("chief_justice", "report_writer")
