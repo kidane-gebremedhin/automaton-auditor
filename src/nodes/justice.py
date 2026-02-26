@@ -36,11 +36,19 @@ TECHLED_WEIGHT = 1.5
 PROSECUTOR_WEIGHT = 1.2
 DEFENSE_WEIGHT = 0.9
 
-# Phrases that indicate a confirmed vulnerability (not just the word "security")
+# Phrases that indicate a *confirmed* vulnerability (not just the word "security").
+# IMPORTANT: Only include phrases that describe actual security violations in code.
+# Generic phrases like "no error handling" must NOT appear here — they cause
+# false-positive FAIL overrides when judges discuss error handling in other criteria.
 SECURITY_VULNERABILITY_PHRASES = (
-    "security vulnerability", "security flaw", "security risk", "security violation",
-    "os.system", "shell injection", "command injection", "unsanitized input",
-    "raw os.system", "no error handling", "drops code into", "security negligence",
+    "security vulnerability confirmed",
+    "security flaw confirmed",
+    "os.system(",           # Actual os.system call (not docstring mentions)
+    "raw os.system",
+    "shell injection",
+    "command injection",
+    "unsanitized input executed",
+    "security negligence confirmed",
 )
 
 
