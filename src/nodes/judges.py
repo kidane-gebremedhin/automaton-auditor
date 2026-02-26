@@ -36,33 +36,45 @@ ORCHESTRATION_FRAUD = (
 # -----------------------------------------------------------------------------
 
 PROSECUTOR_SYSTEM = (
-    "You are the Prosecutor. Your role is to evaluate the audit evidence with strict, critical standards. "
-    "Emphasize gaps, missing evidence, and failures to meet requirements. "
-    "Give low scores when evidence is absent or weak. "
-    "Your argument must stress what was not demonstrated or what contradicts the claims. "
+    "You are the Prosecutor — a strict, adversarial auditor. "
+    "Your mission is to find every gap, weakness, and failure in the evidence. "
+    "Actively look for: missing implementations, security flaws, laziness, shortcuts, "
+    "vague claims without code backing, and any contradiction between claims and evidence. "
+    "You MUST disagree with charitable interpretations where evidence allows. "
+    "Give low scores (0-4) when evidence is absent, weak, or contradicts the criterion. "
+    "Only give high scores (7+) when evidence is overwhelming and leaves no room for doubt. "
+    "Your argument must stress what was NOT demonstrated, what is missing, and what fails. "
     f"{HALLUCINATION_LIABILITY} "
     f"{ORCHESTRATION_FRAUD} "
-    "Output a single JudicialOpinion: judge='Prosecutor', criterion_id, score (0-10), argument, cited_evidence (list of short refs from the evidence)."
+    "Output a single JudicialOpinion: judge='Prosecutor', criterion_id, score (0-10), argument, cited_evidence."
 )
 
 DEFENSE_SYSTEM = (
-    "You are the Defense. Your role is to interpret the audit evidence charitably and highlight what was achieved. "
-    "Emphasize partial compliance, reasonable interpretations, and benefit of the doubt. "
-    "Give higher scores when any evidence supports the criterion, even if incomplete. "
-    "Your argument must stress what was demonstrated and plausible readings of the evidence. "
+    "You are the Defense Attorney — a charitable advocate for the developer's work. "
+    "Your mission is to find merit, reward effort, and interpret evidence in the best light. "
+    "Actively look for: partial compliance, creative workarounds, intent behind implementations, "
+    "reasonable readings of ambiguous evidence, and effort that deserves recognition. "
+    "You MUST disagree with overly strict interpretations where evidence allows. "
+    "Give higher scores (6-9) when any evidence supports the criterion, even if incomplete. "
+    "Only give low scores (0-3) when there is truly zero evidence of any attempt. "
+    "Your argument must stress what WAS demonstrated, plausible readings, and developer intent. "
     f"{HALLUCINATION_LIABILITY} "
     f"{ORCHESTRATION_FRAUD} "
-    "Output a single JudicialOpinion: judge='Defense', criterion_id, score (0-10), argument, cited_evidence (list of short refs from the evidence)."
+    "Output a single JudicialOpinion: judge='Defense', criterion_id, score (0-10), argument, cited_evidence."
 )
 
 TECH_LEAD_SYSTEM = (
-    "You are the Tech Lead. Your role is to evaluate technical correctness and architecture. "
-    "Focus on state management, graph orchestration, code structure, and correctness of claims. "
-    "Score based on whether the evidence shows real implementation (e.g. StateGraph, fan-out) or vague claims. "
-    "Your argument must reference specific technical evidence (files, structure, diagrams). "
+    "You are the Tech Lead — a pragmatic engineering evaluator focused on architecture and correctness. "
+    "Your mission is to assess whether the code is technically sound, modular, and maintainable. "
+    "Actively verify: StateGraph usage, fan-out/fan-in patterns, Pydantic models, reducer correctness, "
+    "subprocess safety, error handling, and whether the architecture would work in production. "
+    "You MUST focus on technical merit rather than philosophical arguments. "
+    "Score based on whether evidence shows real, working implementation versus vague claims. "
+    "Give high scores (7-10) when the architecture is solid and code is correct. "
+    "Your argument must reference specific files, code patterns, and technical evidence. "
     f"{HALLUCINATION_LIABILITY} "
     f"{ORCHESTRATION_FRAUD} "
-    "Output a single JudicialOpinion: judge='TechLead', criterion_id, score (0-10), argument, cited_evidence (list of short refs from the evidence)."
+    "Output a single JudicialOpinion: judge='TechLead', criterion_id, score (0-10), argument, cited_evidence."
 )
 
 # -----------------------------------------------------------------------------
@@ -137,12 +149,14 @@ def _invoke_judge(
             if isinstance(out, JudicialOpinion):
                 # Force criterion_id when we asked for a specific criterion
                 cid = criterion_id if criterion_id else out.criterion_id
+                # Validate cited_evidence refs against evidence (cite validation)
+                valid_refs = _validate_cited_refs(out.cited_evidence, evidence_text)
                 return JudicialOpinion(
                     judge=judge_name,
                     criterion_id=cid,
                     score=out.score,
                     argument=out.argument,
-                    cited_evidence=out.cited_evidence or [],
+                    cited_evidence=valid_refs,
                 )
             return out
         except (ValidationError, TypeError, ValueError) as e:
@@ -152,6 +166,25 @@ def _invoke_judge(
                 user_content += f"\n\n[Parse error: {e}. Reply with a valid JudicialOpinion JSON.]"
     logger.error("Judge %s failed after %s retries", judge_name, MAX_PARSE_RETRIES)
     return None
+
+
+def _validate_cited_refs(cited: list[str] | None, evidence_text: str) -> list[str]:
+    """Filter cited_evidence to only refs that appear in the evidence blob (cite validation).
+
+    Removes hallucinated refs (e.g. 'repo#99' when only repo#0-#6 exist).
+    """
+    if not cited:
+        return []
+    valid: list[str] = []
+    for ref in cited:
+        # Accept refs like 'repo#0', 'docs#1', 'vision#0'
+        if f"[{ref}]" in evidence_text:
+            valid.append(ref)
+        elif ref in evidence_text:
+            valid.append(ref)
+        else:
+            logger.debug("Cite validation: dropped invalid ref %r", ref)
+    return valid if valid else list(cited[:3])  # Fallback: keep first 3 if all fail
 
 
 # -----------------------------------------------------------------------------
@@ -249,17 +282,74 @@ def run_judges(state: AgentState) -> dict:
 
 
 # -----------------------------------------------------------------------------
-# Legacy: single-opinion judge nodes (used if graph fans out to prosecutor/defense/tech_lead)
+# Parallel judge nodes: one node per persona, evaluates ALL rubric criteria.
+# Graph fans out to these three nodes in parallel (Send), then fans in at
+# judges_aggregator. This creates the second fan-out/fan-in pattern required
+# by the rubric (first is detectives).
 # -----------------------------------------------------------------------------
 
 
-def judges_hub(state: AgentState) -> dict:
-    """Run Prosecutor, Defense, and TechLead on identical evidence.
+def _run_all_criteria_for_judge(
+    state: AgentState,
+    judge_name: Literal["Prosecutor", "Defense", "TechLead"],
+    system_prompt: str,
+) -> dict:
+    """Run one judge persona across all rubric criteria. Returns merged opinions."""
+    rubric_dimensions = state.get("rubric_dimensions") or []
+    all_opinions: list[JudicialOpinion] = []
 
-    All three receive the same state (evidences, rubric). Opinions are merged
-    via state reducer (operator.add). For true concurrency, wire the graph
-    to fan-out to prosecutor/defense/tech_lead nodes and fan-in to the next step.
+    if not rubric_dimensions:
+        result = _run_judge(state, judge_name, system_prompt)
+        return result
+
+    for dim in rubric_dimensions:
+        cid = dim.get("id") or ""
+        name = dim.get("name") or cid.replace("_", " ").title()
+        desc = dim.get("description") or ""
+        if not cid:
+            continue
+        result = _run_judge(
+            state,
+            judge_name,
+            system_prompt,
+            criterion_id=cid,
+            dimension_name=name,
+            dimension_description=desc,
+        )
+        all_opinions.extend(result.get("opinions") or [])
+    return {"opinions": all_opinions}
+
+
+def prosecutor_node(state: AgentState) -> dict:
+    """Parallel graph node: Prosecutor evaluates all criteria.
+
+    Runs in parallel with defense_node and tech_lead_node via fan-out (Send).
+    Strict, adversarial evaluation — looks for gaps, security flaws, laziness.
     """
+    return _run_all_criteria_for_judge(state, "Prosecutor", PROSECUTOR_SYSTEM)
+
+
+def defense_node(state: AgentState) -> dict:
+    """Parallel graph node: Defense evaluates all criteria.
+
+    Runs in parallel with prosecutor_node and tech_lead_node via fan-out (Send).
+    Charitable evaluation — rewards effort, intent, creative workarounds.
+    """
+    return _run_all_criteria_for_judge(state, "Defense", DEFENSE_SYSTEM)
+
+
+def tech_lead_node(state: AgentState) -> dict:
+    """Parallel graph node: Tech Lead evaluates all criteria.
+
+    Runs in parallel with prosecutor_node and defense_node via fan-out (Send).
+    Pragmatic evaluation — architectural soundness, maintainability, viability.
+    """
+    return _run_all_criteria_for_judge(state, "TechLead", TECH_LEAD_SYSTEM)
+
+
+# Legacy: sequential fallback (kept for backward compatibility)
+def judges_hub(state: AgentState) -> dict:
+    """Run Prosecutor, Defense, and TechLead sequentially on identical evidence."""
     all_opinions: list[JudicialOpinion] = []
     for fn in (prosecutor, defense, tech_lead):
         result = fn(state)
