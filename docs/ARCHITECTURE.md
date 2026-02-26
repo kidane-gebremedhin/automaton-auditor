@@ -9,18 +9,29 @@ This document captures architecture decisions, known gaps with a concrete plan, 
 The system is built around two main architectural patterns:
 
 1. **Parallel evidence collection (Detective layer)**  
-   After loading the rubric and routing (context_builder), evidence gathering **fans out** so that multiple detectives run **in parallel** on the same inputs: **RepoInvestigator** (clone, AST, git history), **DocAnalyst** (PDF report), and **VisionInspector** (diagrams). PDF is converted once (`pdf_preprocess`), then **doc_detective** and **vision_detective** run in parallel. All detective outputs **fan in** at **evidence_aggregator**, where state reducers merge evidence by source (`repo`, `docs`, `vision`). No detective sees another’s output; they produce objective, non-opinionated evidence only.
+   After loading the rubric and routing (context_builder), evidence gathering **fans out** so that multiple detectives run **in parallel** on the same inputs: **RepoInvestigator** (clone, AST, git history), **DocAnalyst** (PDF report), and **VisionInspector** (diagrams). PDF is converted once (`pdf_preprocess`), then **doc_detective** and **vision_detective** run in parallel. All detective outputs **fan in** at **evidence_aggregator**, where state reducers merge evidence by source (`repo`, `docs`, `vision`). No detective sees another's output; they produce objective, non-opinionated evidence only.
 
-2. **Judge system (Dialectical Bench)**  
-   After evidence is aggregated, the **Dialectical Bench** evaluates it: three distinct roles—**Prosecutor** (strict, gap-focused), **Defense** (charitable, effort-focused), and **Tech Lead** (pragmatic, architecture-focused)—each produce a **JudicialOpinion** (score, argument, cited evidence) **per rubric criterion**. They all see the **same** evidence; their prompts enforce different lenses. The **Chief Justice** (deterministic, no LLM) then applies rules (Rule of Security, Rule of Evidence, functionality weight, dissent handling) to synthesize a final verdict and remediation. The report (Executive Summary, Criterion Breakdown, Remediation Plan) is the output of this synthesis.
+2. **Judge system (Dialectical Bench) — True Parallel Execution**  
+   After evidence is aggregated, the **Dialectical Bench** evaluates it via a **second fan-out/fan-in pattern**: three distinct nodes—**prosecutor_node** (strict, gap-focused), **defense_node** (charitable, effort-focused), and **tech_lead_node** (pragmatic, architecture-focused)—run **in parallel** via `Send()`. Each node produces a **JudicialOpinion** (score, argument, cited evidence) **per rubric criterion**. They all see the **same** evidence; their prompts enforce different lenses (<50% prompt overlap). All opinions **fan in** at **judges_aggregator** (state merged by `operator.add` on `opinions`). The **Chief Justice** (deterministic, no LLM) then applies rules (Rule of Security, Rule of Evidence, functionality weight, dissent handling) to synthesize a final verdict and remediation. The report (Executive Summary, Criterion Breakdown, Remediation Plan) is the output of this synthesis.
 
-The diagrams below make the **parallel evidence collection** and the **judge system** explicit.
+The diagrams below make the **two fan-out/fan-in patterns** explicit.
 
 **Theoretical depth (rubric alignment):**
 
-- **Fan-In / Fan-Out** is tied to specific graph edges: fan-out at `context_builder` (conditional edges → `repo_detective`, `pdf_preprocess`) and at `pdf_preprocess` (→ `doc_detective`, `vision_detective`); fan-in at `evidence_aggregator`. A second fan-out is the `run_judges` node (three personas per criterion); fan-in at `judges_aggregator` before `chief_justice`. See `src/graph.py` and the StateGraph flow in §3.
-- **Dialectical Synthesis** is implemented via three parallel judge personas (Prosecutor, Defense, Tech Lead) that evaluate the same evidence with conflicting philosophies; the Chief Justice then applies deterministic rules (Rule of Security, Rule of Evidence, functionality weight, variance re-evaluation) to produce a single verdict per criterion.
-- **Metacognition** is connected to the system evaluating its own evaluation quality: the Chief Justice re-evaluates judge opinions (fact supremacy, dissent handling, weighted score vs. thresholds) and produces the final AuditReport (Executive Summary, Criterion Breakdown, Remediation Plan), so the pipeline does not simply average scores but applies explicit re-evaluation rules.
+- **Fan-In / Fan-Out** is tied to specific graph edges:
+  - **Fan-out #1 (Detectives):** `context_builder` → conditional edges (`Send`) to `repo_detective` and `pdf_preprocess`; `pdf_preprocess` → `Send` to `doc_detective` and `vision_detective`.
+  - **Fan-in #1:** `repo_detective`, `doc_detective`, `vision_detective` → `evidence_aggregator` (state merged by `operator.ior` on `evidences` dict).
+  - **Fan-out #2 (Judges):** `evidence_aggregator` → `judges_router` returns `[Send("prosecutor_node", state), Send("defense_node", state), Send("tech_lead_node", state)]`.
+  - **Fan-in #2:** `prosecutor_node`, `defense_node`, `tech_lead_node` → `judges_aggregator` (state merged by `operator.add` on `opinions` list).
+  - See `src/graph.py` and the StateGraph flow in §3.
+- **Dialectical Synthesis** is implemented via three parallel judge personas (Prosecutor, Defense, Tech Lead) that evaluate the same evidence with actively conflicting philosophies. The Prosecutor is instructed to be adversarial ("find every gap, weakness, and failure"), the Defense to be charitable ("reward effort, intent, and creative workarounds"), and the Tech Lead to be pragmatic ("assess whether the code is technically sound"). The Chief Justice then applies deterministic rules (Rule of Security, Rule of Evidence, functionality weight, variance re-evaluation) to produce a single verdict per criterion. This dialectical process means that no single perspective dominates—the final score is a synthesis of genuinely conflicting evaluations.
+- **Metacognition** describes the system evaluating its own evaluation quality. The Chief Justice performs metacognitive re-evaluation at multiple levels:
+  1. **Fact supremacy:** Detective evidence (objective facts) overrides judge opinions (interpretations). If a judge claims "Deep Metacognition" but detectives found no supporting code, the claim is overruled for hallucination.
+  2. **Variance re-evaluation:** When score variance ≥ threshold across judges, the Chief Justice re-evaluates rather than averaging. High variance triggers a downgrade (PASS → PARTIAL), forcing the system to acknowledge uncertainty in its own assessment.
+  3. **Security override:** If any evidence confirms a security vulnerability, the score is capped regardless of Defense arguments.
+  4. **Dissent summary:** Every criterion with significant disagreement includes an explicit dissent explanation, making the system's internal disagreement transparent.
+  This means the system does not simply average scores but applies explicit rules to evaluate whether its judges' evaluations are trustworthy—the definition of metacognition.
+- **State Synchronization** is achieved through Annotated reducers on `AgentState`. `operator.ior` on `evidences` (dict) merges detective outputs by key without overwriting; `operator.add` on `opinions` (list) concatenates judge outputs. This ensures parallel nodes can write to shared state without race conditions or data loss, which is critical for the fan-out/fan-in architecture.
 
 ---
 
@@ -102,9 +113,15 @@ The diagrams below make the **parallel evidence collection** and the **judge sys
 
 **Current state:**
 
-- **One node `run_judges`:** For each rubric dimension, it runs Prosecutor, Defense, and Tech Lead with that criterion only (`criterion_id` + dimension name/description in the prompt). Output is one `JudicialOpinion` per (judge, criterion).
-- **Structured output:** Each judge returns `JudicialOpinion` via `.with_structured_output()`; retries on parse failure.
-- **Personas:** Fixed system prompts (Prosecutor strict, Defense charitable, Tech Lead pragmatic); Hallucination Liability and Orchestration Fraud rules in every prompt.
+- **One node per persona:** `prosecutor_node`, `defense_node`, `tech_lead_node` are separate graph nodes, each processing all rubric criteria independently.
+- **True parallel execution:** The graph wires these three nodes via `Send()` fan-out from `evidence_aggregator`. LangGraph executes them concurrently.
+- **Structured output:** Each judge returns `JudicialOpinion` via `.with_structured_output()`; retries on parse failure (up to 3 attempts).
+- **Cite validation:** After each judge response, `cited_evidence` refs are validated against the actual evidence blob. Invalid refs are filtered.
+- **Personas:** Distinct system prompts with <50% textual overlap:
+  - **Prosecutor:** Adversarial—"find every gap, weakness, and failure"; "look for missing implementations, security flaws, laziness"
+  - **Defense:** Charitable—"find merit, reward effort"; "interpret evidence in the best light"; "partial compliance counts"
+  - **Tech Lead:** Pragmatic—"assess whether the code is technically sound, modular, and maintainable"; "reference specific files and code patterns"
+- **Rules in every prompt:** Hallucination Liability (cite only provided evidence) and Orchestration Fraud (claim parallel/fan-out only if evidenced).
 
 **Gaps:**
 
@@ -117,10 +134,10 @@ The diagrams below make the **parallel evidence collection** and the **judge sys
 
 | # | Action | Owner / location |
 |---|--------|-------------------|
-| 1 | **Parallelize judge invocations:** Fan-out from evidence_aggregator to one node per (criterion_id, judge), or use a bounded concurrency pool inside `run_judges` (e.g. asyncio or thread pool) so up to K criterion×judge calls run in parallel. | `src/graph.py` (optional fan-out) or `src/nodes/judges.py` (async/batch) |
-| 2 | **Stricter persona prompts:** Add one line per judge: "You must disagree in spirit with the other two roles where evidence allows." Optionally inject a short "evidence summary" per criterion so the model doesn’t lose focus. | `src/nodes/judges.py` (PROSECUTOR_SYSTEM, etc.) |
-| 3 | **Cite validation:** After each judge response, filter `cited_evidence` to refs that appear in `_evidence_for_prompt` (e.g. allow only `source#i` that exist). Log or truncate invalid refs. | `src/nodes/judges.py` (_invoke_judge or _run_judge) |
-| 4 | **1–5 in prompt:** Change judge prompt to "score (1–5)" and set Pydantic `score: int` with `ge=1, le=5`. Remove 0–10 mapping in report. | `src/nodes/judges.py`, `src/state.py` (if needed), `src/report_serializer.py` |
+| 1 | ~~**Parallelize judge invocations:**~~ **DONE.** Three separate nodes (`prosecutor_node`, `defense_node`, `tech_lead_node`) wired via `Send()` fan-out from `evidence_aggregator`. | `src/graph.py`, `src/nodes/judges.py` |
+| 2 | ~~**Stricter persona prompts:**~~ **DONE.** <50% overlap; explicit adversarial/charitable/pragmatic instructions with "MUST disagree" directive. | `src/nodes/judges.py` |
+| 3 | ~~**Cite validation:**~~ **DONE.** `_validate_cited_refs` filters invalid refs post-response. | `src/nodes/judges.py` |
+| 4 | **1–5 in prompt:** Change judge prompt to "score (1–5)" and set Pydantic `score: int` with `ge=1, le=5`. Remove 0–10 mapping in report. | `src/nodes/judges.py`, `src/state.py`, `src/report_serializer.py` |
 
 ---
 
@@ -221,18 +238,18 @@ flowchart TB
 - **Three roles:** Each role has a distinct system prompt (Prosecutor: low scores for gaps; Defense: reward effort; Tech Lead: technical correctness). Output is always a structured `JudicialOpinion` (score, argument, cited_evidence).
 - **Fan-in:** All opinions are collected (via state reducer `operator.add` on `opinions`). The graph then runs **chief_justice** once, which applies Rule of Security, Rule of Evidence, functionality weight, and dissent logic to produce the final verdict and remediation.
 
-**Implementation note:** In the current graph, Prosecutor, Defense, and Tech Lead are not separate nodes; they are invoked sequentially **inside** the single `run_judges` node (once per rubric criterion). The diagram above is the logical view of the judge system: three roles, same evidence, opinions merged before synthesis.
+**Implementation note:** Prosecutor, Defense, and Tech Lead are three separate graph nodes (`prosecutor_node`, `defense_node`, `tech_lead_node`) wired via `Send()` fan-out from `evidence_aggregator`. LangGraph executes them concurrently. Each node evaluates all rubric criteria for its persona. Opinions fan in at `judges_aggregator` via `operator.add` reducer.
 
 ### 3.3 Full StateGraph (End-to-End)
 
-End-to-end flow from START to END, with parallel evidence collection and the judge system highlighted.
+End-to-end flow from START to END, with **two parallel fan-out/fan-in patterns** highlighted.
 
 ```mermaid
 flowchart TB
     START([START])
     CB[context_builder]
 
-    subgraph detectives["Detective layer (parallel)"]
+    subgraph detectives["Detective layer (fan-out #1 / fan-in #1)"]
         RO[repo_detective]
         PP[pdf_preprocess]
         DOC[doc_detective]
@@ -240,8 +257,10 @@ flowchart TB
     end
     EA[evidence_aggregator]
 
-    subgraph judges["Judge system (Dialectical Bench)"]
-        RJ[run_judges\nProsecutor + Defense + Tech Lead\nper criterion]
+    subgraph judges["Judge system (fan-out #2 / fan-in #2)"]
+        PN[prosecutor_node\nstrict / adversarial]
+        DN[defense_node\ncharitable / effort-focused]
+        TN[tech_lead_node\npragmatic / architecture]
     end
     JA[judges_aggregator]
     CJ[chief_justice]
@@ -249,23 +268,29 @@ flowchart TB
     END([END])
 
     START --> CB
-    CB --> RO
-    CB --> PP
+    CB -->|"Send"| RO
+    CB -->|"Send"| PP
     PP --> DOC
     PP --> VIZ
     RO --> EA
     DOC --> EA
     VIZ --> EA
-    EA --> RJ
-    RJ --> JA
+    EA -->|"Send"| PN
+    EA -->|"Send"| DN
+    EA -->|"Send"| TN
+    PN --> JA
+    DN --> JA
+    TN --> JA
     JA --> CJ
     CJ --> RW
     RW --> END
 ```
 
-- **Left:** Parallel evidence collection (detectives → evidence_aggregator).
-- **Center:** Judge system: `run_judges` runs the Dialectical Bench (Prosecutor, Defense, Tech Lead) for each criterion; opinions fan in at `judges_aggregator`.
-- **Right:** Synthesis (Chief Justice) and report output.
+- **Fan-out #1 (Detectives):** `context_builder` → `Send(repo_detective)`, `Send(pdf_preprocess)` → `Send(doc_detective)`, `Send(vision_detective)`.
+- **Fan-in #1:** All detectives → `evidence_aggregator`. State merged by `operator.ior` on `evidences`.
+- **Fan-out #2 (Judges):** `evidence_aggregator` → `Send(prosecutor_node)`, `Send(defense_node)`, `Send(tech_lead_node)`.
+- **Fan-in #2:** All judges → `judges_aggregator`. State merged by `operator.add` on `opinions`.
+- **Synthesis:** `chief_justice` (deterministic) → `report_writer` → END.
 
 ### 3.4 State Reducers (Where Parallel Writes Merge)
 
