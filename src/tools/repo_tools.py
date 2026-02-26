@@ -34,6 +34,29 @@ class CloneError(RepoToolError):
     pass
 
 
+class AuthenticationError(CloneError):
+    """Git authentication failed (bad credentials, missing token, permission denied).
+
+    Subclass of CloneError so callers catching CloneError still handle auth failures.
+    Rubric: 'Authentication failures caught and reported.'
+    """
+
+    pass
+
+
+# Patterns in git stderr that indicate authentication failure (not network or other errors).
+_AUTH_FAILURE_PATTERNS = (
+    "authentication failed",
+    "could not read username",
+    "could not read password",
+    "permission denied",
+    "invalid credentials",
+    "bad credentials",
+    "fatal: could not read from remote repository",
+    "repository not found",  # GitHub returns 404 for private repos without auth
+)
+
+
 class GitHistoryError(RepoToolError):
     """Git log or repo access failed."""
 
@@ -186,6 +209,12 @@ def clone_repo_sandboxed(repo_url: str, target_dir: str | Path | None = None) ->
         err = (result.stderr or result.stdout or "(no output)").strip()
         if cleanup_path is not None:
             shutil.rmtree(cleanup_path, ignore_errors=True)
+        # Check for authentication failure explicitly (rubric: 'Authentication failures caught and reported')
+        err_lower = err.lower()
+        if any(pattern in err_lower for pattern in _AUTH_FAILURE_PATTERNS):
+            raise AuthenticationError(
+                f"git authentication failed for {repo_url!r}: {err}"
+            )
         raise CloneError(f"git clone failed: {err}")
 
     if not clone_into.exists() or not (clone_into / ".git").exists():
