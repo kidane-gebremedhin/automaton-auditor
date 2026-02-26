@@ -1,8 +1,12 @@
 # LangGraph Digital Courtroom: Detectives (parallel) -> EvidenceAggregator -> Judges (parallel) -> ChiefJustice -> END
 #
 # Graph structure (rubric): START -> [Detectives in parallel] -> EvidenceAggregator -> [Judges in parallel] -> ChiefJustice -> END.
-# Fan-out: context_builder -> detectives_router (Send to repo_detective, pdf_preprocess); pdf_preprocess -> doc_detective + vision_detective.
-# Fan-in: repo_detective, doc_detective, vision_detective -> evidence_aggregator. Then run_judges (all three personas) -> judges_aggregator -> chief_justice -> report_writer -> END.
+# Fan-out #1 (Detectives): context_builder -> detectives_router (Send to repo_detective, pdf_preprocess);
+#   pdf_preprocess -> doc_detective + vision_detective.
+# Fan-in #1: repo_detective, doc_detective, vision_detective -> evidence_aggregator.
+# Fan-out #2 (Judges): evidence_aggregator -> judges_router (Send to prosecutor_node, defense_node, tech_lead_node).
+# Fan-in #2: prosecutor_node, defense_node, tech_lead_node -> judges_aggregator.
+# Then: judges_aggregator -> chief_justice -> report_writer -> END.
 # Conditional edges handle routing and optional vision; error states are handled by node try/except and evidence found=False.
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from langgraph.types import Send
 from src.config import configure_tracing
 from src.nodes.context import context_builder
 from src.nodes.detectives import doc_detective, pdf_preprocess, repo_detective, vision_inspector
-from src.nodes.judges import run_judges
+from src.nodes.judges import defense_node, prosecutor_node, tech_lead_node
 from src.nodes.justice import chief_justice, report_writer
 from src.state import AgentState
 
@@ -44,9 +48,17 @@ def after_pdf_preprocess_router(state: AgentState) -> list[Send]:
     return sends
 
 
-def judges_router(state: AgentState) -> str:
-    """Single node: run_judges evaluates every criterion with all three judges (Prosecutor, Defense, Tech Lead)."""
-    return "run_judges"
+def judges_router(state: AgentState) -> list[Send]:
+    """Fan-out #2: send evidence to all three judge nodes in parallel (Prosecutor, Defense, Tech Lead).
+
+    Each judge node evaluates all rubric criteria from its distinct persona.
+    This creates the second fan-out/fan-in pattern (first is detectives).
+    """
+    return [
+        Send("prosecutor_node", state),
+        Send("defense_node", state),
+        Send("tech_lead_node", state),
+    ]
 
 
 def evidence_aggregator(state: AgentState) -> dict:
@@ -70,27 +82,37 @@ def no_input_handler(state: AgentState) -> dict:
 
 
 def build_graph() -> StateGraph:
-    """Build the complete StateGraph with parallel Detectives and Judges.
+    """Build the complete StateGraph with TWO parallel fan-out/fan-in patterns.
 
-    FLOW:
-      START -> (conditional) -> [repo_detective || doc_detective || vision_detective] (parallel)
-           -> evidence_aggregator (fan-in)
-           -> [prosecutor || defense || tech_lead] (parallel)
-           -> chief_justice -> report_writer -> END
+    FLOW (two distinct fan-out/fan-in patterns):
+      START -> context_builder
+        -> (conditional fan-out #1) -> [repo_detective || doc_detective || vision_detective] (parallel)
+        -> evidence_aggregator (fan-in #1)
+        -> (fan-out #2) -> [prosecutor_node || defense_node || tech_lead_node] (parallel)
+        -> judges_aggregator (fan-in #2)
+        -> chief_justice -> report_writer -> END
 
-    Reducers (AgentState): evidences (operator.ior), opinions (operator.add).
-    Missing PDF: doc_detective and vision_detective are not sent when pdf_path is missing.
+    Fan-out #1 (Detectives): context_builder -> Send(repo_detective), Send(pdf_preprocess -> doc/vision).
+    Fan-in #1: All detectives -> evidence_aggregator (state merged by operator.ior on evidences).
+    Fan-out #2 (Judges): evidence_aggregator -> Send(prosecutor_node, defense_node, tech_lead_node).
+    Fan-in #2: All judges -> judges_aggregator (state merged by operator.add on opinions).
     """
     graph = StateGraph(AgentState)
 
-    # Nodes
+    # Nodes — Detective layer
     graph.add_node("context_builder", context_builder)
     graph.add_node("repo_detective", repo_detective)
     graph.add_node("pdf_preprocess", pdf_preprocess)
     graph.add_node("doc_detective", doc_detective)
     graph.add_node("vision_detective", vision_inspector)
     graph.add_node("evidence_aggregator", evidence_aggregator)
-    graph.add_node("run_judges", run_judges)
+
+    # Nodes — Judge layer (parallel: three distinct personas)
+    graph.add_node("prosecutor_node", prosecutor_node)
+    graph.add_node("defense_node", defense_node)
+    graph.add_node("tech_lead_node", tech_lead_node)
+
+    # Nodes — Synthesis layer
     graph.add_node("judges_aggregator", judges_aggregator)
     graph.add_node("chief_justice", chief_justice)
     graph.add_node("report_writer", report_writer)
@@ -116,13 +138,18 @@ def build_graph() -> StateGraph:
     graph.add_edge("doc_detective", "evidence_aggregator")
     graph.add_edge("vision_detective", "evidence_aggregator")
 
-    # no_input -> judges (need evidence_aggregator first for flow consistency; no_input goes to aggregator then judges)
+    # no_input -> judges (need evidence_aggregator first for flow consistency)
     graph.add_edge("no_input", "evidence_aggregator")
 
-    # EvidenceAggregator -> run_judges (one verdict per judge per criterion) -> JudgesAggregator -> ChiefJustice
-    graph.add_conditional_edges("evidence_aggregator", judges_router, {"run_judges": "run_judges"})
+    # EvidenceAggregator -> [Judges in parallel] (fan-out #2: Send to prosecutor, defense, tech_lead)
+    graph.add_conditional_edges("evidence_aggregator", judges_router)
 
-    graph.add_edge("run_judges", "judges_aggregator")
+    # Judges -> JudgesAggregator (fan-in #2)
+    graph.add_edge("prosecutor_node", "judges_aggregator")
+    graph.add_edge("defense_node", "judges_aggregator")
+    graph.add_edge("tech_lead_node", "judges_aggregator")
+
+    # JudgesAggregator -> ChiefJustice -> Report -> END
     graph.add_edge("judges_aggregator", "chief_justice")
 
     # ChiefJustice -> Report -> END
