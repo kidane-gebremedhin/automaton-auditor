@@ -43,13 +43,16 @@ DEFENSE_WEIGHT = 0.9
 SECURITY_VULNERABILITY_PHRASES = (
     "security vulnerability confirmed",
     "security flaw confirmed",
-    "os.system(",           # Actual os.system call (not docstring mentions)
     "raw os.system",
     "shell injection",
     "command injection",
     "unsanitized input executed",
     "security negligence confirmed",
 )
+# NOTE: 'os.system(' was removed from phrases above because judges often mention
+# 'no os.system' or 'os.system=False' when discussing compliance with the rubric.
+# These false-positive matches were causing FAIL overrides for safe_tool_engineering
+# even when no actual os.system usage exists.
 
 
 # -----------------------------------------------------------------------------
@@ -289,14 +292,19 @@ def _synthesize_criterion(
     # 4b) Compute evidence strength: if all relevant evidence for this criterion
     # is found with high confidence, fact supremacy should override dissent.
     evidence_strong = False
+    cid_normalized = criterion_id.replace("_", " ").replace("-", " ").lower().strip()
     for _source, items in (evidences or {}).items():
         for e in items:
-            if e.goal and e.goal.replace(" ", "_").replace("-", "_") == criterion_id.replace(" ", "_").replace("-", "_"):
+            if not e.goal:
+                continue
+            goal_normalized = e.goal.replace("_", " ").replace("-", " ").lower().strip()
+            # Exact match after normalization
+            if goal_normalized == cid_normalized:
                 if e.found and e.confidence >= 0.8:
                     evidence_strong = True
-            # Also match partial goal names (e.g. "graph orchestration" matches "graph_orchestration")
-            elif e.goal and criterion_id.replace("_", " ") in e.goal.replace("_", " "):
-                if e.found and e.confidence >= 0.8:
+            # Partial match: "report accuracy (paths)" contains "report accuracy"
+            elif cid_normalized in goal_normalized or goal_normalized in cid_normalized:
+                if e.found and e.confidence >= 0.6:
                     evidence_strong = True
 
     # 5) Variance re-evaluation (when no opinions, use fact verdict or FAIL)

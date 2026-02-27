@@ -499,7 +499,7 @@ def analyze_safe_tool_engineering(repo_path: str) -> tuple[bool, str]:
     tool_files = sorted(tools_dir.glob("*.py"), key=lambda f: (0 if "repo" in f.name else 1, f.name))
     text_parts: list[str] = []
     for f in tool_files:
-        text_parts.append(_read_snippet(f, 3000))
+        text_parts.append(_read_snippet(f, 6000))
     combined = "\n---\n".join(text_parts)
     has_tempfile = "tempfile" in combined
     has_subprocess = "subprocess.run" in combined or "subprocess." in combined
@@ -509,7 +509,7 @@ def analyze_safe_tool_engineering(repo_path: str) -> tuple[bool, str]:
     if has_tempfile and has_subprocess and not has_os_system:
         return True, (
             f"tempfile={has_tempfile} subprocess.run/equivalent={has_subprocess} os.system={has_os_system} (must be false). "
-            f"Snippet from tools (repo_tools.py first): {primary_snippet[:2500]}"
+            f"Snippet from tools (repo_tools.py first): {primary_snippet[:5000]}"
         )
     return False, (
         f"tempfile={has_tempfile} subprocess={has_subprocess} os.system={has_os_system}. "
