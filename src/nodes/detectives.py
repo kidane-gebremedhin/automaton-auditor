@@ -203,6 +203,28 @@ def repo_detective(state: AgentState) -> dict:
             )
         except Exception:
             pass
+        # Judicial nuance (judges.py: distinct persona prompts for Prosecutor, Defense, TechLead)
+        try:
+            judges_path = root / "src" / "nodes" / "judges.py"
+            if judges_path.exists():
+                from src.tools.repo_tools import _read_snippet
+                judges_snippet = _read_snippet(judges_path, 3000)
+                has_prosecutor = "Prosecutor" in judges_snippet and "adversarial" in judges_snippet.lower()
+                has_defense = "Defense" in judges_snippet and ("forgiving" in judges_snippet.lower() or "charitable" in judges_snippet.lower())
+                has_techlead = "TechLead" in judges_snippet or "Tech Lead" in judges_snippet
+                all_distinct = has_prosecutor and has_defense and has_techlead
+                evidences.append(
+                    Evidence(
+                        goal="judicial_nuance",
+                        found=all_distinct,
+                        content=f"Prosecutor(adversarial)={has_prosecutor} Defense(charitable)={has_defense} TechLead(pragmatic)={has_techlead}. Snippet: {judges_snippet[:2000]}",
+                        location=str(judges_path),
+                        rationale="Scan judges.py for three distinct judge personas with conflicting philosophies.",
+                        confidence=0.9 if all_distinct else 0.5,
+                    )
+                )
+        except Exception:
+            pass
     finally:
         if cleanup_path is not None and Path(cleanup_path).exists():
             _shutil.rmtree(cleanup_path, ignore_errors=True)

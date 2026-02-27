@@ -117,10 +117,24 @@ def _invoke_judge(
     If criterion_id is set, the prompt instructs the judge to evaluate only that criterion
     and the returned opinion is forced to that criterion_id (one verdict per judge per criterion).
     """
-    from langchain_openai import ChatOpenAI
+    from src.config import get_llm, get_structured_output_method
 
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
-    structured_llm = llm.with_structured_output(JudicialOpinion)
+    llm = get_llm(temperature=0.2)
+    method = get_structured_output_method()
+    so_kwargs: dict = {}
+    if method:
+        so_kwargs["method"] = method
+    structured_llm = llm.with_structured_output(JudicialOpinion, **so_kwargs)
+
+    # json_mode doesn't embed the schema automatically — add it to the prompt
+    if method == "json_mode":
+        schema_hint = (
+            "You MUST respond with a JSON object matching this schema:\n"
+            '{"judge": "<string>", "criterion_id": "<string>", '
+            '"score": <int 0-10>, "argument": "<string>", '
+            '"cited_evidence": ["<string>", ...]}\n\n'
+        )
+        system_prompt = schema_hint + system_prompt
 
     if criterion_id:
         user_content = (

@@ -127,8 +127,14 @@ def variance_re_evaluation(
     fact_verdict: str,
     fact_summary: str,
     synthesis_rules: dict | None = None,
+    evidence_strong: bool = False,
 ) -> tuple[str, str]:
-    """When variance is high (dissent), re-evaluate. Uses synthesis_rules thresholds when provided."""
+    """When variance is high (dissent), re-evaluate. Uses synthesis_rules thresholds when provided.
+
+    If evidence_strong is True (all relevant evidence found with high confidence),
+    fact_supremacy takes precedence: dissent from opinions alone cannot override
+    strong forensic evidence (rubric: 'Forensic evidence always overrules Judicial opinion').
+    """
     sr = synthesis_rules or {}
     pass_thresh = sr.get("score_threshold_pass", SCORE_THRESHOLD_PASS)
     partial_thresh = sr.get("score_threshold_partial", SCORE_THRESHOLD_PARTIAL)
@@ -136,8 +142,12 @@ def variance_re_evaluation(
         return fact_verdict, fact_summary
     if dissent:
         if weighted_score >= pass_thresh:
+            if evidence_strong:
+                return VERDICT_PASS, "Dissent among judges, but strong evidence supports pass (fact supremacy)."
             return VERDICT_PARTIAL, "Dissent among judges; downgraded to PARTIAL despite weighted pass."
         if weighted_score >= partial_thresh:
+            if evidence_strong:
+                return VERDICT_PASS, "Evidence strongly supports criterion despite dissent (fact supremacy)."
             return VERDICT_PARTIAL, "Dissent among judges; PARTIAL."
         return VERDICT_FAIL, "Dissent among judges; weighted score below threshold."
     if weighted_score >= pass_thresh:
@@ -276,13 +286,27 @@ def _synthesize_criterion(
     # 4) Dissent
     dissent = dissent_requirement(opinions, synthesis_rules)
 
+    # 4b) Compute evidence strength: if all relevant evidence for this criterion
+    # is found with high confidence, fact supremacy should override dissent.
+    evidence_strong = False
+    for _source, items in (evidences or {}).items():
+        for e in items:
+            if e.goal and e.goal.replace(" ", "_").replace("-", "_") == criterion_id.replace(" ", "_").replace("-", "_"):
+                if e.found and e.confidence >= 0.8:
+                    evidence_strong = True
+            # Also match partial goal names (e.g. "graph orchestration" matches "graph_orchestration")
+            elif e.goal and criterion_id.replace("_", " ") in e.goal.replace("_", " "):
+                if e.found and e.confidence >= 0.8:
+                    evidence_strong = True
+
     # 5) Variance re-evaluation (when no opinions, use fact verdict or FAIL)
     if not opinions:
         verdict = fact_verdict or VERDICT_FAIL
         summary = fact_summary or "No judge opinions for this criterion."
     else:
         verdict, summary = variance_re_evaluation(
-            weighted, dissent, fact_verdict, fact_summary, synthesis_rules
+            weighted, dissent, fact_verdict, fact_summary, synthesis_rules,
+            evidence_strong=evidence_strong,
         )
 
     refs: list[str] = []

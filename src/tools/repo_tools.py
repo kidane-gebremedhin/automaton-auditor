@@ -398,6 +398,10 @@ def analyze_graph_structure(path: str) -> GraphStructureResult:
         details_parts.append(f"add_edge calls: {len(add_edge_calls)}")
     if has_conditional_edges:
         details_parts.append("add_conditional_edges: present (fan-out via router)")
+    # Include source snippet so judges can see actual fan-out/fan-in code
+    graph_snippet = _read_snippet(graph_file, 2500)
+    if graph_snippet:
+        details_parts.append(f"\nGraph source (first 2500 chars):\n{graph_snippet}")
 
     return GraphStructureResult(
         path=str(graph_file),
@@ -491,17 +495,21 @@ def analyze_safe_tool_engineering(repo_path: str) -> tuple[bool, str]:
     tools_dir = root / "src" / "tools"
     if not tools_dir.exists():
         return False, "No src/tools directory."
+    # Prioritize repo_tools.py (has tempfile, subprocess, auth handling) over other tool files
+    tool_files = sorted(tools_dir.glob("*.py"), key=lambda f: (0 if "repo" in f.name else 1, f.name))
     text_parts: list[str] = []
-    for f in tools_dir.glob("*.py"):
-        text_parts.append(_read_snippet(f, 1500))
+    for f in tool_files:
+        text_parts.append(_read_snippet(f, 3000))
     combined = "\n---\n".join(text_parts)
     has_tempfile = "tempfile" in combined
     has_subprocess = "subprocess.run" in combined or "subprocess." in combined
-    has_os_system = any(_ast_has_os_system_call(f) for f in tools_dir.glob("*.py"))
+    has_os_system = any(_ast_has_os_system_call(f) for f in tool_files)
+    # Show the most relevant file (repo_tools.py) snippet first
+    primary_snippet = text_parts[0] if text_parts else ""
     if has_tempfile and has_subprocess and not has_os_system:
         return True, (
             f"tempfile={has_tempfile} subprocess.run/equivalent={has_subprocess} os.system={has_os_system} (must be false). "
-            f"Snippet from tools: {combined[:1500]}"
+            f"Snippet from tools (repo_tools.py first): {primary_snippet[:2500]}"
         )
     return False, (
         f"tempfile={has_tempfile} subprocess={has_subprocess} os.system={has_os_system}. "
@@ -515,13 +523,13 @@ def analyze_structured_output(repo_path: str) -> tuple[bool, str]:
     p = root / "src" / "nodes" / "judges.py"
     if not p.exists():
         return False, "No src/nodes/judges.py."
-    text = _read_snippet(p, 2500)
+    text = _read_snippet(p, 6000)
     has_structured = "with_structured_output" in text and "JudicialOpinion" in text
     has_retry = "retry" in text.lower() or "MAX_PARSE_RETRIES" in text or "attempt" in text
     if has_structured:
         return True, (
             f"with_structured_output(JudicialOpinion)={has_structured} retry/parse handling={has_retry}. "
-            f"Snippet: {text[:1200]}"
+            f"Snippet: {text[:2500]}"
         )
     return False, "with_structured_output(JudicialOpinion) or equivalent not found in judges.py."
 
